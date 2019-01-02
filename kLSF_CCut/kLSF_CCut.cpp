@@ -3,13 +3,30 @@
 #include <algorithm>                 // for std::for_each
 #include <boost/graph/graph_traits.hpp> // for creation of descriptors vertex and edges.
 #include <boost/graph/adjacency_list.hpp> //for usage of adjacency list
+#include <boost/graph/filtered_graph.hpp>
 #include <ilcplex/ilocplex.h>
 #include <unordered_set>
+#include <boost/dynamic_bitset.hpp>
 ILOSTLBEGIN //initialization make vs work properly
 
 using namespace boost;
 
 //basic definitions
+typedef adjacency_list<vecS, vecS, undirectedS, no_property, property<edge_color_t, int>> graph_t;
+typedef dynamic_bitset<> db;
+//Callbacks new to me new to you let god save my soul
+
+ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray,z,graph_t,g) {
+	int size = z.getSize();
+	db temp(size);
+	for (int i = 0; i < size; ++i) {
+		if (getValue(z[i])) temp.set(i);
+	}
+
+}
+
+
+
 
 //template function to print edges.
 template<class EdgeIter, class Graph>
@@ -32,6 +49,10 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, const int k, const Graph &g)
 	int n_colors = Z.getSize();
 	int f_colors = n_colors - num_vertices(g) + 1;
 	//setting names to labels variables.
+	typedef typename property_map<Graph, edge_color_t>::const_type ColorMap;
+	typedef typename graph_traits<Graph>::edge_iterator eit;
+	eit it, end;
+	ColorMap colors = get(edge_color, g);
 	for (int i = 0; i<n_colors; ++i) {
 		Z[i].setName(("z" + std::to_string(i)).c_str());
 	}
@@ -43,7 +64,16 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, const int k, const Graph &g)
 	mod.add(IloMinimize(env, exp));
 	exp.end();
 	//first constraint relaxed add by cuts
-
+	// new constraint (4.4)CCut strength tree search
+	IloExpr exptreecut(env);
+	std::tie(it, end) = edges(g);
+	while (it != end) {
+		exptreecut += Z[colors[*it]];
+		++it;
+	}
+	int N = num_vertices(g) - 1;
+	mod.add(exptreecut >= N);
+	exptreecut.end();
 	//second constraint
 	IloExpr texp(env);
 	for (int i = 0; i < f_colors; ++i) {
@@ -98,14 +128,25 @@ int main()
 		IloCplex cplex(model);
 		cplex.exportModel("kSLF_CCut_relaxed.lp"); // good to see if the model is correct
 											//cross your fingers
-		//cplex.solve();
-		//cplex.out() << "solution status = " << cplex.getStatus() << endl;
 
-		//cplex.out() << endl;
-		//cplex.out() << "Number of components   = " << cplex.getObjValue() << endl;
-		//for (int i = 0; i <= Z.getSize() - n_vertices; i++) {
-		//	cplex.out() << "  Z" << i << " = " << cplex.getValue(Z[i]) << endl;
-		//}
+		//cuts
+
+		cplex.use(MyCuts(env,Z,g));
+		//cplex.use(LazyCallback(env,Z));
+
+		//paramenters
+		//cplex.setParam(IloCplex::Param::MIP::Display,5);
+		//cplex.setParam(IloCplex::Param::Tune::Display,3);
+		//cplex.setParam(IloCplex::Param::Simplex::Display, 2);
+
+		cplex.solve();
+		cplex.out() << "solution status = " << cplex.getStatus() << endl;
+
+		cplex.out() << endl;
+		cplex.out() << "Number of components   = " << cplex.getObjValue() << endl;
+		for (int i = 0; i <= Z.getSize() - n_vertices; i++) {
+			cplex.out() << "  Z" << i << " = " << cplex.getValue(Z[i]) << endl;
+		}
 
 	}
 	catch (IloException& e) {
