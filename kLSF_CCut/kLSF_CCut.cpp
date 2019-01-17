@@ -71,7 +71,7 @@ property_map<graph_t, edge_color_t>::type get_colors(Graph &g) {
 
 //Callbacks new to me new to you let god save my soul
 
-ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray, z, graph_t, g) {
+ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray, z, graph_t&, g) {
 	int size = z.getSize();
 	db temp(size);
 	std::vector<int> components(num_vertices(g));
@@ -104,7 +104,7 @@ ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray, z, graph_t, g) {
 
 
 
-ILOLAZYCONSTRAINTCALLBACK2(LazyCallback, IloBoolVarArray,z,graph_t,g) {
+ILOLAZYCONSTRAINTCALLBACK2(LazyCallback, IloBoolVarArray,z,graph_t&,g) {
 	int size = z.getSize();
 	db temp(size);
 	std::vector<int> components(num_vertices(g));
@@ -212,12 +212,12 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		IloBoolVarArray Z(env, n_colors);
 		buildCCutModel(model, Z, k, g);
 		IloCplex cplex(model);
-		cplex.exportModel("kSLF_CCut_relaxed.lp"); // good to see if the model is correct
+		//cplex.exportModel("kSLF_CCut_relaxed.lp"); // good to see if the model is correct
 												   //cross your fingers
 
 												   //cuts
 
-		cplex.use(MyCuts(env, Z, g));
+		//cplex.use(MyCuts(env, Z, g));
 		cplex.use(LazyCallback(env, Z, g));
 
 		//paramenters
@@ -225,16 +225,22 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		//cplex.setParam(IloCplex::Param::Tune::Display, 3);
 		//cplex.setParam(IloCplex::Param::Simplex::Display, 2);
 		cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
+		cplex.setParam(IloCplex::Param::Parallel, -1);
+		cplex.setParam(IloCplex::Param::Threads,4);// n threads
 		cplex.solve();
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
-
+		db temp(n_colors);
 		cplex.out() << endl;
 		cplex.out() << "Number of components of original problem  = " << cplex.getObjValue() << endl;
 		cplex.out() << "color(s) solution:";
-		for (int i = 0; i < Z.getSize(); i++) {
-			if(cplex.getValue(Z[i])==1) cplex.out() << "  " << i;
+		for (int i = 0; i < Z.getSize()-n_vertices + 1; i++) {
+			if (cplex.getValue(Z[i]) == 1) {
+				cplex.out() << "  " << i;
+				temp.set(i);
+			}
 		}
 		cplex.out() << std::endl;
+		print_filtered_graph(g, temp);
 	}
 	catch (IloException& e) {
 		std::cerr << "Concert exception caught: " << e << endl;
@@ -297,11 +303,11 @@ int main(int argc, const char *argv[])
 			vector<string> vecI;
 			split(vecI, vm["input-file"].as<string>(), is_any_of("-."), token_compress_off);
 			if (vecI.size() == 6) {
-				std::cout << vecI[0] << std::endl;
+				std::cout <<"n_vertices:"<< vecI[0] << std::endl;
 				n_vertices = stoi(vecI[0]);
-				std::cout << vecI[2] << std::endl;
+				std::cout << "n_colors:" << vecI[2] << std::endl;
 				n_colors = stoi(vecI[2]);
-				std::cout << vecI[3] << std::endl;
+				std::cout << "k:" << vecI[3] << std::endl;
 				int k = stoi(vecI[3]);
 				//add edges to super source vertex. remember!!!
 				vertex_t u = add_vertex(g);
