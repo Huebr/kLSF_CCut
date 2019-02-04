@@ -13,6 +13,7 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/graph/filtered_graph.hpp>
 #include <boost/exception/all.hpp>
+#include <boost/random.hpp>
 #include <exception>
 #include <vector>
 ILOSTLBEGIN //initialization make vs work properly
@@ -35,7 +36,28 @@ struct valid_edge_color {
 	EdgeColorMap m_color;
 	ValidColorsMap v_map;
 };
-
+//template function to print edges.
+template<class EdgeIter, class Graph>
+void print_edges(EdgeIter first, EdgeIter last, const Graph& G) {
+	typedef typename property_map<Graph, edge_color_t>::const_type ColorMap;
+	ColorMap colors = get(edge_color, G);
+	//make color type generic
+	//typedef typename property_traits<ColorMap>::value_type ColorType;
+	//ColorType edge_color;
+	for (auto it = first; it != last; ++it) {
+		std::cout << "Edge: " << "(" << source(*it, G) << "," << target(*it, G) << ") " << " Color: " << colors[*it] << "\n";
+		std::cout << "Edge: " << "(" << target(*it, G) << "," << source(*it, G) << ") " << " Color: " << colors[*it] << "\n";
+	}
+	std::cout << " Number of vertex: " << num_vertices(G) << std::endl;
+	std::cout << " Number of edges: " << num_edges(G) << std::endl;
+	std::vector<int> components(num_vertices(G));
+	int num = connected_components(G, &components[0]);
+	std::vector<int>::size_type i;
+	std::cout << "Total number of components: " << num << std::endl;
+	for (i = 0; i != components.size(); ++i)
+		std::cout << "Vertex " << i << " is in component " << components[i] << std::endl;
+	std::cout << std::endl;
+}
 
 
 template<class Graph, class Mask>
@@ -68,17 +90,106 @@ property_map<graph_t, edge_color_t>::type get_colors(Graph &g) {
 	return colors;
 }
 
-
-//Callbacks new to me new to you let god save my soul
-
-ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray, z, graph_t&, g) {
+ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 	int size = z.getSize();
 	db temp(size);
 	std::vector<int> components(num_vertices(g));
 	auto colors = get_colors(g);
 	graph_traits<graph_t>::edge_iterator it, end;
 	for (int i = 0; i < size; ++i) { //using colors of original graph
-		if (getValue(z[i])>0.0) temp.set(i);
+		if (getValue(z[i])>0) temp.set(i);
+	}
+	//std::cout << " user cutting" << std::endl;
+	int no = get_components(g, temp, components);
+	int num_c_best = no;
+	
+	boost::random::mt19937 rng;
+						// see pseudo-random number generators
+	// distribution that maps to 1..6
+	// see random number distributions
+	while (num_c_best >= 2 ) {//peharps temp.count() < k_sup
+		/*boost::random::uniform_int_distribution<> gen(0, size-1);
+		int i = gen(rng);
+		if (!temp.test(i))temp.set(i);
+		*/
+		int diff;
+		int best_label = -1;// produces randomness out of thin air	
+		int best_diff = num_vertices(g);
+		no = num_c_best;
+		for (int i = 0; i <= z.getSize(); ++i) {
+			if (!temp.test(i)) {
+				temp.set(i);
+				num_c_best = get_components(g, temp, components);
+				diff = no- num_c_best;
+				if (diff<best_diff) {
+					best_diff = diff;
+					best_label = i;
+					temp.flip(i);
+					break;
+				}
+				temp.flip(i);
+			}
+		}
+		if (best_label >= 0)temp.set(best_label);
+		num_c_best = get_components(g, temp, components);
+	}
+	while (num_c_best == 1) {
+		int diff;
+		int best_label = -1;
+		int best_diff = num_vertices(g);
+		no = num_c_best;
+		for (int i = 0; i <= z.getSize(); ++i) {
+			if (temp.test(i)) {
+				temp.flip(i);
+				num_c_best = get_components(g, temp, components);
+				diff = num_c_best - no;
+				if (diff<best_diff) {
+					best_diff = diff;
+					best_label = i;
+				}
+				if (diff > 0) {
+					best_diff = diff;
+					best_label = i;
+					temp.set(i);
+					break;
+				}
+				temp.set(i);
+			}
+		}
+		if (best_label >= 0)temp.flip(best_label);
+		num_c_best = get_components(g, temp, components);
+	}
+	if (num_c_best > 1) {
+		//std::cout << "add user cut" << std::endl;
+		db temp1(size);
+		std::tie(it, end) = edges(g);
+		IloExpr expr(getEnv());
+		while (it != end) {
+			if (components[source(*it, g)] != components[target(*it, g)]) {
+				if (components[source(*it, g)] == 0 || components[target(*it, g)] == 0) {
+					temp1.set(colors[*it]);
+				}
+			}
+			++it;
+		}
+		for (int i = 0; i < z.getSize(); ++i) if (temp1.test(i))expr += z[i];
+		//std::cout <<std::endl<< (expr >= 1) << std::endl;
+		add(expr >= 1).end();
+		expr.end();
+	}
+
+
+}
+//Callbacks new to me new to you let god save my soul
+
+ILOUSERCUTCALLBACK2(MyDFSCuts, IloBoolVarArray, z, graph_t&, g) {
+	int size = z.getSize();
+	db temp(size);
+	std::vector<int> components(num_vertices(g));
+	auto colors = get_colors(g);
+	graph_traits<graph_t>::edge_iterator it, end;
+	for (int i = 0; i < size; ++i) { //using colors of original graph
+		if (getValue(z[i])>0) temp.set(i);
 	}
 	//std::cout << " user cutting" << std::endl;
 	int num_c = get_components(g, temp, components);
@@ -96,6 +207,7 @@ ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray, z, graph_t&, g) {
 			++it;
 		}
 		for (int i = 0; i < z.getSize(); ++i) if (temp1.test(i))expr += z[i];
+		//std::cout <<std::endl<< (expr >= 1) << std::endl;
 		add(expr >= 1).end();
 		expr.end();
 	}
@@ -104,18 +216,22 @@ ILOUSERCUTCALLBACK2(MyCuts, IloBoolVarArray, z, graph_t&, g) {
 
 
 
-ILOLAZYCONSTRAINTCALLBACK2(LazyCallback, IloBoolVarArray,z,graph_t&,g) {
+ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray,z,int,k,graph_t&,g) {
 	int size = z.getSize();
 	db temp(size);
-	std::vector<int> components(num_vertices(g));
+	int n_vertices = num_vertices(g);
+	int f_colors = size - n_vertices + 1;
+	std::vector<int> components(n_vertices);
 	auto colors = get_colors(g);
 	graph_traits<graph_t>::edge_iterator it, end;
 	for (int i = 0; i < size  ; ++i) { //using colors of original graph
-		if (getValue(z[i])>0.0) temp.set(i);
+		if (std::abs(getValue(z[i])-1)<=1e-3) temp.set(i);
 	}
 	//std::cout << "lazy cutting"<<std::endl;
+	//if (temp.count() < k)std::cout <<std::endl << "invalid number of colors" << std::endl;
 	int num_c = get_components(g,temp,components);
 	if (num_c > 1) {
+
 		//std::cout << "add cut" << std::endl;
 		db temp1(size);
 		std::tie(it,end) = edges(g);
@@ -129,7 +245,7 @@ ILOLAZYCONSTRAINTCALLBACK2(LazyCallback, IloBoolVarArray,z,graph_t&,g) {
 			++it;
 		}
 		for (int i = 0; i < z.getSize(); ++i) if(temp1.test(i))expr += z[i];
-		add(expr >= 1).end();
+		addLocal(expr >= 1).end();
 		expr.end();
 	}
 	//else std::cout << "found optimal" << std::endl;
@@ -138,28 +254,7 @@ ILOLAZYCONSTRAINTCALLBACK2(LazyCallback, IloBoolVarArray,z,graph_t&,g) {
 
 
 
-//template function to print edges.
-template<class EdgeIter, class Graph>
-void print_edges(EdgeIter first, EdgeIter last, const Graph& G) {
-	typedef typename property_map<Graph, edge_color_t>::const_type ColorMap;
-	ColorMap colors = get(edge_color, G);
-	//make color type generic
-	//typedef typename property_traits<ColorMap>::value_type ColorType;
-	//ColorType edge_color;
-	for (auto it = first; it != last; ++it) {
-		std::cout << "Edge: " << "(" << source(*it, G) << "," << target(*it, G) << ") " << " Color: " << colors[*it] << "\n";
-		std::cout << "Edge: " << "(" << target(*it, G) << "," << source(*it, G) << ") " << " Color: " << colors[*it] << "\n";
-	}
-	std::cout << " Number of vertex: " << num_vertices(G) << std::endl;
-	std::cout << " Number of edges: " << num_edges(G) << std::endl;
-	std::vector<int> components(num_vertices(G));
-	int num = connected_components(G, &components[0]);
-	std::vector<int>::size_type i;
-	std::cout << "Total number of components: " << num << std::endl;
-	for (i = 0; i != components.size(); ++i)
-		std::cout << "Vertex " << i << " is in component " << components[i] << std::endl;
-	std::cout << std::endl;
-}
+
 template<class Graph>
 void buildCCutModel(IloModel mod,IloBoolVarArray Z, const int k, const Graph &g) {
 	IloEnv env = mod.getEnv();
@@ -196,9 +291,14 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, const int k, const Graph &g)
 	for (int i = 0; i < f_colors; ++i) {
 		texp += Z[i];
 	}
-	mod.add(texp <= k);
+	mod.add(texp == k);
 	texp.end();
-
+	IloExpr nexp(env);
+	for (int i = f_colors; i < n_colors; ++i) {
+		nexp += Z[i];
+	}
+	mod.add(nexp>=1);//setar para 1
+	nexp.end();
 }
 
 
@@ -217,8 +317,9 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 
 												   //cuts
 
-		//cplex.use(MyCuts(env, Z, g));
-		cplex.use(LazyCallback(env, Z, g));
+		cplex.use(MyDFSCuts(env, Z, g));
+		//cplex.use(MyNewCuts(env, Z, g));
+		cplex.use(LazyCallback(env, Z,k, g));
 
 		//paramenters
 		//cplex.setParam(IloCplex::Param::MIP::Display, 5);
@@ -234,7 +335,7 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		cplex.out() << "Number of components of original problem  = " << cplex.getObjValue() << endl;
 		cplex.out() << "color(s) solution:";
 		for (int i = 0; i < Z.getSize()-n_vertices + 1; i++) {
-			if (cplex.getValue(Z[i]) == 1) {
+			if (std::abs(cplex.getValue(Z[i]) - 1) <= 1e-3) {
 				cplex.out() << "  " << i;
 				temp.set(i);
 			}
