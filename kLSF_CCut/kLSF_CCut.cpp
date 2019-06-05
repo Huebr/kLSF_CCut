@@ -19,6 +19,7 @@
 #include <boost/random.hpp>
 #include <exception>
 #include <queue>
+#include <set>
 #include <vector>
 ILOSTLBEGIN //initialization make vs work properly
 
@@ -147,19 +148,20 @@ int max_reduce(Graph &g, int n_curr, int n_colors, std::vector<int> &comp, int l
 
 // need to think
 ILOBRANCHCALLBACK3(MyBranchStrategy, IloBoolVarArray, z,int,k, graph_t&, g) {
+	if (hasIncumbent()) {
 		int n_colors = z.getSize();
 		int f_colors = n_colors - num_vertices(g) + 1;// trying to pick original colors
 		db mask_curr(n_colors);
 		for (int i = 0; i < f_colors; ++i) {
 			volatile float ub = getUB(z[i]);
 			volatile float lb = getLB(z[i]);
-			if (std::abs(ub-lb) <= 1e-3&&std::abs(ub - 1.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
+			if (std::abs(ub - lb) <= 1e-3&&std::abs(ub - 1.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
 				mask_curr.set(i);
 			}
 		}
 		std::vector<int> components(num_vertices(g));// components graph
 		int n_curr = get_components(g, mask_curr, components); //number of components original graph
-		int n_opt = (hasIncumbent())?getIncumbentObjValue():getCutoff();
+		int n_opt = getIncumbentObjValue();
 		int max = 0;
 		//max reduce evaluation
 		volatile int num_undecided_colors = k - mask_curr.count();
@@ -177,9 +179,10 @@ ILOBRANCHCALLBACK3(MyBranchStrategy, IloBoolVarArray, z,int,k, graph_t&, g) {
 				max += tmp[i];
 			}
 		}
-		if ((n_curr - max) > n_opt + 1) {
+		if ((n_curr - max) >= n_opt + 1) {
 			prune();
 		}
+	}
 }
 
 
@@ -196,7 +199,7 @@ ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 	int no = get_components(g, temp, components);
 	int num_c_best = no;
 	
-	boost::random::mt19937 rng;
+	//boost::random::mt19937 rng;
 						// see pseudo-random number generators
 	// distribution that maps to 1..6
 	// see random number distributions
@@ -231,20 +234,23 @@ ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 	num_c_best = get_components(g, temp, components);
 	if (num_c_best > 1) {
 		//std::cout << "add user cut" << std::endl;
-		db temp1(size);
+		//db temp1(size);
 		std::tie(it, end) = edges(g);
 		IloExpr expr(getEnv());
+		vector<db> masks(num_c_best);
+		for (int i = 0; i < num_c_best; ++i) masks[i].resize(size);
 		while (it != end) {
 			if (components[source(*it, g)] != components[target(*it, g)]) {
-				if (components[source(*it, g)] == 0 || components[target(*it, g)] == 0) {
-					temp1.set(colors[*it]);
-				}
+				masks[components[source(*it, g)]].set(colors[*it]);
+				masks[components[target(*it, g)]].set(colors[*it]);
 			}
 			++it;
 		}
-		for (int i = 0; i < z.getSize(); ++i) if (temp1.test(i))expr += z[i];
-		//std::cout <<std::endl<< (expr >= 1) << std::endl;
-		add(expr >= 1).end();
+		for (int i = 0; i < num_c_best; ++i) {
+			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
+			add(expr >= 1,IloCplex::UseCutFilter);
+			expr.clear();
+		}
 		expr.end();
 	}
 
@@ -306,16 +312,20 @@ ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray,z,int,k,graph_t&,g) {
 		db temp1(size);
 		std::tie(it,end) = edges(g);
 		IloExpr expr(getEnv());
+		vector<db> masks(num_c);
+		for (int i = 0; i < num_c; ++i) masks[i].resize(size);
 		while (it != end) {
 			if (components[source(*it,g)]!=components[target(*it, g)]) {
-				if (components[source(*it, g)] == 0 || components[target(*it, g)] == 0) {
-					temp1.set(colors[*it]);
-				}
+					masks[components[source(*it, g)]].set(colors[*it]);
+					masks[components[target(*it, g)]].set(colors[*it]);
 			}
 			++it;
 		}
-		for (int i = 0; i < z.getSize(); ++i) if(temp1.test(i))expr += z[i];
-		addLocal(expr >= 1).end();
+		for (int i = 0; i < num_c; ++i) {
+			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
+			addLocal(expr >= 1);
+			expr.clear();
+		}
 		expr.end();
 	}
 	//else std::cout << "found optimal" << std::endl;
@@ -397,7 +407,54 @@ int kLSFCGA(Graph &g, int k_sup, int n_labels,int alfa, double beta) {
 	return  num_c_best;//just to be right
 }
 
-
+// preprocessing functions
+template<class Graph>
+void treefy(Graph& g, int n_colors) {
+	Graph result(num_vertices(g));
+	typedef boost::graph_traits<Graph>::edge_descriptor edge_t;
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	typedef typename fg::edge_iterator eit;
+	eit it, end;
+	for (int l = 0; l < n_colors; ++l) {
+		db mask(n_colors);
+		mask.set(l);
+		std::vector<int> components(num_vertices(g));// components graph
+		int n_curr = get_components(g, mask, components);
+		std::vector<int> my_mapping(n_curr, -1);
+		for (int u = 0; u < num_vertices(g); ++u) {
+			if (my_mapping[components[u]] == -1)my_mapping[components[u]] = u;
+			else add_edge(my_mapping[components[u]], u, property<edge_color_t, int>(l), result);
+		}
+	}
+	g.clear();
+	copy_graph(result, g);
+}
+template<class Graph>
+void completefy(Graph& g, int n_colors) {
+	Graph result(num_vertices(g));
+	typedef boost::graph_traits<Graph>::edge_descriptor edge_t;
+	typedef typename property_map<Graph, edge_color_t>::type EdgeColorMap;
+	typedef filtered_graph<Graph, valid_edge_color<EdgeColorMap, db> > fg;
+	typedef typename fg::edge_iterator eit;
+	eit it, end;
+	for (int l = 0; l < n_colors; ++l) {
+		db mask(n_colors);
+		mask.set(l);
+		std::vector<int> components(num_vertices(g));// components graph
+		int n_curr = get_components(g, mask, components);
+		std::vector<int> my_mapping(n_curr, -1);
+		for (int u = 0; u < num_vertices(g); ++u) {
+			for (int v = u + 1; v < num_vertices(g); ++v) {
+				if (components[u] == components[v]) {
+					add_edge(u, v, property<edge_color_t, int>(l), result);
+				}
+			}
+		}
+	}
+	g.clear();
+	copy_graph(result, g);
+}
 // preprocessing functions
 template<class Graph>
 void MCR(Graph& g, int n_colors) {
@@ -632,9 +689,10 @@ int main(int argc, const char *argv[])
 				vertex_t u = add_vertex(g);
 				n_vertices++;
 				for (int i = 0; i < n_vertices - 1; ++i) boost::add_edge(u, i, property<edge_color_t, int>(n_colors++), g);
+				//boost::add_edge(95, 76, property<edge_color_t, int>(n_colors++), g)
 				//std::tie(it, end) = boost::edges(g);
 				//print_edges(it, end, g);
-				MCR(g,n_colors);
+				//MCR(g,n_colors);
 				solveModel(n_vertices, n_colors, k, g);
 			}
 			else {
