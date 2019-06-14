@@ -331,6 +331,53 @@ ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray,z,int,k,graph_t&,g) {
 	//else std::cout << "found optimal" << std::endl;
 }
 
+// creating method to order priorities colors by heuristic
+template <class Graph>
+IloNumArray ordering(IloEnv& env,int n_labels,Graph& g,int k_sup) {
+	IloNumArray pri(env, n_labels);
+	std::vector<int> components(num_vertices(g));
+	int priority = n_labels;
+	bool flag = false;
+	db temp2(n_labels);
+	while (!temp2.all()) {
+		db temp(n_labels);
+		int num_c = get_components(g, temp, components);
+		int num_c_best = num_c;
+		while (temp.count() < k_sup) {
+			if (n_labels - temp2.count() < k_sup) {
+				flag = true;
+				break;
+			}
+			int best_label = 0;
+			for (int i = 0; i < n_labels; ++i) {
+				if (!temp.test(i)&&!temp2.test(i)) {
+					temp.set(i);
+					int nc = get_components(g, temp, components);
+					if (nc <= num_c_best) {
+						num_c_best = nc;
+						best_label = i;
+					}
+					temp.flip(i);
+				}
+			}
+			temp.set(best_label);
+			temp2.set(best_label);
+			pri[best_label] = priority--;
+		}
+		if (flag) {
+			for (int p = priority; p >= 0; p--) {
+				for (int i = 0; i < n_labels; ++i) {
+					if (!temp2.test(i)) {
+						temp2.set(i);
+						pri[i] = p;
+					}
+				}
+			}
+		}
+	}
+	return pri;
+}
+
 //MVCA modified always has k colors
 template <class Graph>
 int kLSFMVCA(Graph &g, int k_sup, int n_labels) {
@@ -367,7 +414,7 @@ int kLSFCGA(Graph &g, int k_sup, int n_labels,int alfa, double beta) {
 	int num_c_best = num_c;
 	int k_beta = (1.0f - beta)*k_sup;
 	//phase 1
-	for (int i = 0; i <= alfa * k_sup; ++i) {
+	for (int j = 0; j <= alfa * k_sup; ++j) {
 		while (temp.count() < k_beta) {
 			int best_label = 0;
 			for (int i = 0; i < n_labels; ++i) {
@@ -513,6 +560,9 @@ void MCR(Graph& g, int n_colors) {
 }
 
 
+
+
+
 template<class Graph>
 void buildCCutModel(IloModel mod,IloBoolVarArray Z, int k, Graph &g) {
 	IloEnv env = mod.getEnv();
@@ -601,7 +651,7 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		// add set limit time
 		cplex.setParam(IloCplex::TiLim, 7300);
 		//set priorities to colors with more edges.
-		cplex.setPriorities(Z,pri);
+		cplex.setPriorities(Z,ordering(env,n_colors,g,k));
 
 		cplex.solve();
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
