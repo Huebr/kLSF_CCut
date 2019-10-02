@@ -277,7 +277,7 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, const int k, const Graph &g)
 	exp.end();
 	//first constraint relaxed add by cuts
 	// new constraint (4.4)CCut strength tree search
-	IloExpr exptreecut(env);
+	/*IloExpr exptreecut(env);
 	std::tie(it, end) = edges(g);
 	while (it != end) {
 		exptreecut += Z[colors[*it]];
@@ -285,7 +285,7 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, const int k, const Graph &g)
 	}
 	int N = num_vertices(g) - 1;
 	mod.add(exptreecut >= N);
-	exptreecut.end();
+	exptreecut.end();*/
 	//second constraint
 	IloExpr texp(env);
 	for (int i = 0; i < f_colors; ++i) {
@@ -325,9 +325,10 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		//cplex.setParam(IloCplex::Param::MIP::Display, 5);
 		//cplex.setParam(IloCplex::Param::Tune::Display, 3);
 		//cplex.setParam(IloCplex::Param::Simplex::Display, 2);
-		cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
+		//cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
 		cplex.setParam(IloCplex::Param::Parallel, -1);
 		cplex.setParam(IloCplex::Param::Threads,4);// n threads
+		//cplex.setParam(IloCplex::Param::Benders::Strategy, 3);
 		cplex.solve();
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
 		db temp(n_colors);
