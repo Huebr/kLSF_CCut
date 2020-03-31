@@ -26,6 +26,8 @@ ILOSTLBEGIN //initialization make vs work properly
 using namespace boost;
 namespace po = boost::program_options;
 
+typedef IloArray<IloBoolVarArray> IloBoolVarMatrix;
+
 //basic definitions
 typedef typename adjacency_list<vecS, vecS, undirectedS, no_property, property<edge_color_t, int>> graph_t;
 typedef dynamic_bitset<> db;
@@ -146,31 +148,51 @@ int max_reduce(Graph &g, int n_curr, int n_colors, std::vector<int> &comp, int l
 }
 
 
-// need to think
-ILOBRANCHCALLBACK3(MyBranchStrategy, IloBoolVarArray, z,int,k, graph_t&, g) {
-	if (hasIncumbent()) {
+
+
+ILOBRANCHCALLBACK4(MyNewBranchStrategy, IloBoolVarArray, z, int, k, graph_t&, g, int, n_opt) {
+	if (getBranchType() != BranchOnVariable)
+		return;
+	
 		int n_colors = z.getSize();
 		int f_colors = n_colors - num_vertices(g) + 1;// trying to pick original colors
 		db mask_curr(n_colors);
+		db mask_dom(n_colors);
+		db mask_zero(n_colors);
 		for (int i = 0; i < f_colors; ++i) {
 			volatile float ub = getUB(z[i]);
 			volatile float lb = getLB(z[i]);
 			if (std::abs(ub - lb) <= 1e-3&&std::abs(ub - 1.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
 				mask_curr.set(i);
 			}
+			if (std::abs(ub - lb) <= 1e-3&&std::abs(ub - 0.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
+				mask_zero.set(i);
+			}
 		}
-		std::vector<int> components(num_vertices(g));// components graph
-		int n_curr = get_components(g, mask_curr, components); //number of components original graph
-		int n_opt = getIncumbentObjValue();
-		int max = 0;
 		//max reduce evaluation
 		volatile int num_undecided_colors = k - mask_curr.count();
 		if (num_undecided_colors > 0) {
-			std::vector<int> tmp(f_colors);
+			std::vector<int> components(num_vertices(g));// components graph
+			int n_curr = get_components(g, mask_curr, components); //number of components original graph
+			IntegerFeasibilityArray feas(getEnv());
+			getFeasibilities(feas,z);
+			int max = 0;
+			int candidate =-1;
+			int reduction_value = 0;
+			std::vector<int> tmp(f_colors, 0);
 			for (int i = 0; i < f_colors; ++i) { // need to consider all labels undecided
-				if (!mask_curr.test(i)) {// if color i not set in test
+				if (!mask_curr.test(i) && !mask_zero.test(i)) {// if color i not set in test
 					max = max_reduce(g, n_curr, n_colors, components, i);
-					tmp.push_back(max);
+					if (max == 0) {
+						mask_dom.set(i);
+					}
+					else {
+						tmp[i] = max;
+						if (max > reduction_value&&feas[i]==Infeasible) {
+							candidate = i;
+							reduction_value = max;
+						}
+					}
 				}
 			}
 			std::sort(tmp.begin(), tmp.end(), std::greater<int>());
@@ -178,97 +200,112 @@ ILOBRANCHCALLBACK3(MyBranchStrategy, IloBoolVarArray, z,int,k, graph_t&, g) {
 			for (int i = 0; i < num_undecided_colors; ++i) {
 				max += tmp[i];
 			}
+			int m_opt;
+			if (hasIncumbent())m_opt = std::min(n_opt,static_cast<int>(getIncumbentObjValue()));
+			else m_opt = n_opt;
+			if ((n_curr - max) > m_opt + 1) {
+				prune();
+			}
+			else if(candidate !=-1)  {
+			   IloNumVarArray vars(getEnv());
+			   IloNumArray bounds(getEnv());
+			   IloCplex::BranchDirectionArray dirs(getEnv());
+			   vars.add(z[candidate]);
+			   bounds.add(1.0f);
+			   dirs.add(IloCplex::BranchUp);
+			   //fixing in 1 solutions
+			   for (int i=0; i < f_colors; ++i) {		   
+				   if (mask_dom.test(i)) {
+					   vars.add(z[i]);
+					   bounds.add(0.0f);
+					   dirs.add(IloCplex::BranchDown);
+				   }
+			   }
+			   makeBranch(vars, bounds, dirs, getObjValue());
+			   vars.clear();
+			   dirs.clear();
+			   bounds.clear();
+			   vars.add(z[candidate]);
+			   bounds.add(0.0f);
+			   dirs.add(IloCplex::BranchDown);
+			   for (int i = 0; i < f_colors; ++i) {
+				   if (mask_dom.test(i)) {
+					   vars.add(z[i]);
+					   bounds.add(0.0f);
+					   dirs.add(IloCplex::BranchDown);
+				   }
+			   }
+			   makeBranch(vars, bounds, dirs, getObjValue());
+		   }	
 		}
-		if ((n_curr - max) >= n_opt + 1) {
-			prune();
-		}
-	}
 }
 
-
-ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
-	int size = z.getSize();
-	db temp(size);
-	int no;
-	std::vector<int> components(num_vertices(g));
+ILOUSERCUTCALLBACK4(MyNewCuts, IloBoolVarArray, z, int, k, graph_t&, g,int, opt) {
+	int total_size = z.getSize();
+	int n_vertices = num_vertices(g);
+	int size_colors = total_size - n_vertices + 1;
+	db temp(total_size);
+	db temp1(total_size);
+	std::vector<int> components(n_vertices);
 	auto colors = get_colors(g);
 	graph_traits<graph_t>::edge_iterator it, end;
-	for (int i = 0; i < size; ++i) { //using colors of original graph
-		if (getValue(z[i])>0) temp.set(i);
-	}
-	db mask_curr(size);
-	for (int i = 0; i < size; ++i) {
-		volatile float ub = getUB(z[i]);
-		volatile float lb = getLB(z[i]);
-		if (std::abs(ub - lb) <= 1e-3&&std::abs(ub - 1.0f) <= 1e-3) {//verify if is fixed by analisys of bounds verify if need to use float tolerance
-			mask_curr.set(i);
+	IloExpr objExpr(getEnv());
+	for (int i = 0; i < total_size; ++i) { //using colors of original graph
+		if (getValue(z[i]) > 0) {
+			temp.set(i);
+			if (i < size_colors) temp1.set(i);
 		}
+		if(i>= size_colors) objExpr += z[i];
 	}
-	if(mask_curr.any()){
-		no = get_components(g, mask_curr, components);
-		std::tie(it, end) = edges(g);
-		while (it != end) {
-			if (components[source(*it, g)] != components[target(*it, g)]) {
-				mask_curr.set(colors[*it]);
-			}
-			++it;
-		}
-		if (!mask_curr.all()) {
-			IloExpr exprDomination(getEnv());
-			for (int j = 0; j < size; ++j) {
-				if (!mask_curr.test(j)) {
-					exprDomination += z[j];
-				}
-			}
-			addLocal(exprDomination == 0);
-			//std::cout << (exprDomination == 0)<<std::endl;
-			exprDomination.end();
-		}
-	
-	}
-	
-	/*
-	//std::cout << " user cutting" << std::endl;
-	no = get_components(g, temp, components);
-	int num_c_best = no;
-	
-	//boost::random::mt19937 rng;
-						// see pseudo-random number generators
-	// distribution that maps to 1..6
-	// see random number distributions
-	int best_label = -1;// produces randomness out of thin air	
-	while (num_c_best >= 2 && temp.count()< z.getSize()) {//peharps temp.count() < k_sup
 
+	volatile int n_w2 = get_components(g, temp1, components) - 1;
+
+	int best_label = -1;
+	int UB;
+	if (hasIncumbent()) UB = getIncumbentObjValue();
+	else UB = opt;
+	//pertubation phase
+	while (n_w2 > UB&&temp1.count()<size_colors) {//peharps temp.count() < k_sup
 		int diff;
-		int best_diff = num_vertices(g);
-		no = num_c_best;
+		int best_diff = n_vertices;
+		int no = n_w2;
 		best_label = -1;
-		for (int i = 0; i < z.getSize(); ++i) {
-			if (!temp.test(i)) {
-				temp.set(i);
-				num_c_best = get_components(g, temp, components);
-				diff = no- num_c_best;
-				if (diff<best_diff) {
+		IloExpr my_expr(getEnv());
+
+		for (int i = 0; i < size_colors; ++i) {
+			if (!temp1.test(i)) {
+				temp1.set(i);
+				n_w2 = get_components(g, temp1, components) - 1;
+				diff = no - n_w2;
+				if (diff != 0) my_expr += IloInt(diff)*z[i];
+				if (diff < best_diff) {
 					best_diff = diff;
 					best_label = i;
-					temp.flip(i);
-					break;
 				}
-				temp.flip(i);
+				temp1.flip(i);
 			}
 		}
-		if (best_label >= 0)temp.set(best_label);
-		num_c_best = get_components(g, temp, components);
+
+		if (best_label >= 0) {
+			temp1.set(best_label);
+			add(objExpr >= IloInt(no) - my_expr);
+			//std::cout << "corte " << (objExpr >= IloInt(no) - my_expr) << std::endl;
+		}
+
+		//n_w2 = get_components(g, temp1, components);
+		n_w2 = get_components(g, temp1, components) - 1;
+		my_expr.end();
 	}
-	if (best_label >= 0)temp.flip(best_label);
-	num_c_best = get_components(g, temp, components);
-	if (num_c_best > 1) {
+
+	int n_w1 = get_components(g, temp, components);
+	if (n_w1 > 1) {
 		//std::cout << "add user cut" << std::endl;
 		//db temp1(size);
-		std::tie(it, end) = edges(g);
+
 		IloExpr expr(getEnv());
-		std::vector<db> masks(num_c_best);
-		for (int i = 0; i < num_c_best; ++i) masks[i].resize(size);
+		std::vector<db> masks(n_w1);
+		for (int i = 0; i < n_w1; ++i) masks[i].resize(total_size);
+		std::tie(it, end) = edges(g);
 		while (it != end) {
 			if (components[source(*it, g)] != components[target(*it, g)]) {
 				masks[components[source(*it, g)]].set(colors[*it]);
@@ -276,14 +313,16 @@ ILOUSERCUTCALLBACK2(MyNewCuts, IloBoolVarArray, z, graph_t&, g) {
 			}
 			++it;
 		}
-		for (int i = 0; i < num_c_best; ++i) {
-			for (int j = 0; j < z.getSize(); ++j) if (masks[i].test(j))expr += z[j];
-			add(expr >= 1,IloCplex::UseCutFilter);
+		for (int i = 0; i < n_w1; ++i) {
+			for (int j = 0; j < total_size; ++j) if (masks[i].test(j))expr += z[j];
+			add(expr >= 1);
+			//std::cout << "adicionando corte " << (expr >= 1)<<std::endl;
 			expr.clear();
 		}
 		expr.end();
 	}
-	*/
+
+
 }
 //Callbacks new to me new to you let god save my soul
 
@@ -294,7 +333,7 @@ ILOUSERCUTCALLBACK2(MyDFSCuts, IloBoolVarArray, z, graph_t&, g) {
 	auto colors = get_colors(g);
 	graph_traits<graph_t>::edge_iterator it, end;
 	for (int i = 0; i < size; ++i) { //using colors of original graph
-		if (getValue(z[i])>0) temp.set(i);
+		if (getValue(z[i]) > 0) temp.set(i);
 	}
 	//std::cout << " user cutting" << std::endl;
 	int num_c = get_components(g, temp, components);
@@ -313,7 +352,7 @@ ILOUSERCUTCALLBACK2(MyDFSCuts, IloBoolVarArray, z, graph_t&, g) {
 		}
 		for (int i = 0; i < z.getSize(); ++i) if (temp1.test(i))expr += z[i];
 		//std::cout <<std::endl<< (expr >= 1) << std::endl;
-		add(expr >= 1).end();
+		add(expr >= 1);
 		expr.end();
 	}
 	//else std::cout << "is good" << std::endl;
@@ -321,7 +360,7 @@ ILOUSERCUTCALLBACK2(MyDFSCuts, IloBoolVarArray, z, graph_t&, g) {
 
 
 
-ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray,z,int,k,graph_t&,g) {
+ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray, z, int, k, graph_t&, g) {
 	int size = z.getSize();
 	db temp(size);
 	int n_vertices = num_vertices(g);
@@ -329,24 +368,27 @@ ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray,z,int,k,graph_t&,g) {
 	std::vector<int> components(n_vertices);
 	auto colors = get_colors(g);
 	graph_traits<graph_t>::edge_iterator it, end;
-	for (int i = 0; i < size  ; ++i) { //using colors of original graph
-		if (std::abs(getValue(z[i])-1)<=1e-3) temp.set(i);
+	IloExpr objExpr(getEnv());
+	for (int i = 0; i < size; ++i) { //using colors of original graph
+		if (std::abs(getValue(z[i]) - 1) <= 1e-3) temp.set(i);
+		if (i >= f_colors)objExpr +=z[i];
 	}
 	//std::cout << "lazy cutting"<<std::endl;
 	//if (temp.count() < k)std::cout <<std::endl << "invalid number of colors" << std::endl;
-	int num_c = get_components(g,temp,components);
+
+	int num_c = get_components(g, temp, components);
 	if (num_c > 1) {
 
 		//std::cout << "add cut" << std::endl;
 		db temp1(size);
-		std::tie(it,end) = edges(g);
+		std::tie(it, end) = edges(g);
 		IloExpr expr(getEnv());
 		std::vector<db> masks(num_c);
 		for (int i = 0; i < num_c; ++i) masks[i].resize(size);
 		while (it != end) {
-			if (components[source(*it,g)]!=components[target(*it, g)]) {
-					masks[components[source(*it, g)]].set(colors[*it]);
-					masks[components[target(*it, g)]].set(colors[*it]);
+			if (components[source(*it, g)] != components[target(*it, g)]) {
+				masks[components[source(*it, g)]].set(colors[*it]);
+				masks[components[target(*it, g)]].set(colors[*it]);
 			}
 			++it;
 		}
@@ -359,6 +401,54 @@ ILOLAZYCONSTRAINTCALLBACK3(LazyCallback, IloBoolVarArray,z,int,k,graph_t&,g) {
 	}
 	//else std::cout << "found optimal" << std::endl;
 }
+
+
+
+ILOLAZYCONSTRAINTCALLBACK3(LazyCallbackTrivial, IloBoolVarArray, z, int, k, graph_t&, g) {
+	int size = z.getSize();
+	db temp(size);
+	std::vector<int> components(num_vertices(g));
+	auto colors = get_colors(g);
+	int f_colors = size - num_vertices(g) + 1;
+	graph_traits<graph_t>::edge_iterator it, end;
+	for (int i = 0; i < size; ++i) { //using colors of original graph
+		if (std::abs(getValue(z[i]) - 1) <= 1e-3) {
+			temp.set(i);
+		}
+	}
+
+	volatile int num_c_best = get_components(g, temp, components);
+	if (num_c_best > 1) {
+		//std::cout << "add lazy cuts" << std::endl;
+		//db temp1(size);
+		std::tie(it, end) = edges(g);
+		std::vector<db> masks(num_c_best, db(size));
+		IloExprArray exprs(getEnv(), num_c_best);
+		for (int i = 0; i < num_c_best;i++)exprs[i] = IloExpr(getEnv());
+		while (it != end) {
+			volatile int u = components[source(*it, g)];
+			volatile int v = components[target(*it, g)];
+			volatile int c = colors[*it];
+			if (u != v) {
+				if (!masks[u].test(c)){
+					masks[u].set(c);
+					exprs[u] += z[c];
+				}
+				if (!masks[v].test(c)) {
+					masks[v].set(c);
+					exprs[v] += z[c];
+				}
+			}
+			++it;
+		}
+		for (int i = 0; i < num_c_best; ++i) {
+			add(exprs[i] >= 1);
+		}
+		exprs.end();
+	}
+}
+
+
 
 // creating method to order priorities colors by heuristic
 template <class Graph>
@@ -417,6 +507,97 @@ int kLSFMVCA(Graph &g, int k_sup, int n_labels) {
 	while (temp.count() < k_sup) {
 		int best_label = 0;
 		for (int i = 0; i < n_labels - num_vertices(g) + 1; ++i) {
+			if (!temp.test(i)) {
+				temp.set(i);
+				int nc = get_components(g, temp, components);
+				if (nc <= num_c_best) {
+					num_c_best = nc;
+					best_label = i;
+				}
+				temp.flip(i);
+			}
+		}
+		temp.set(best_label);
+	}
+	num_c_best = get_components(g, temp, components);
+	//print_filtered_graph(g,temp);
+	return  num_c_best;//just to be right
+}
+
+
+template <class Graph>
+void addSomeInequalities(Graph &g,IloModel model,IloBoolVarArray z, int opt, int k_sup, int n_labels) {
+	IloEnv env = model.getEnv();
+	std::vector<int> components(num_vertices(g));
+	db temp(n_labels);
+	int num_c = get_components(g, temp, components);
+	int num_c_best = num_c;
+	int componentes_colors = n_labels - num_vertices(g) + 1;
+	IloExpr objExpr(env);
+	for (int i = componentes_colors; i < n_labels; ++i) objExpr += z[i];
+	int best_label;
+	while (num_c_best > opt&&temp.count()<componentes_colors) {
+
+		int n_w = get_components(g, temp, components) - 1;
+		db temp2(temp);
+		IloExpr expr(env);
+		for (int j = 0; j < componentes_colors; ++j) {
+			if (!temp2.test(j)) {
+				temp2.set(j);
+				int n_w2 = get_components(g, temp2, components) - 1;
+				expr += IloInt(n_w - n_w2) * z[j];
+				temp2.flip(j);
+			}
+		}
+		model.add(objExpr >= n_w - expr);
+		expr.end();
+
+
+		for (int i = 0; i < componentes_colors; ++i) {
+			if (!temp.test(i)) {
+				temp.set(i);
+				int nc = get_components(g, temp, components) - 1;
+				if (nc <= num_c_best) {
+					num_c_best = nc;
+					best_label = i;
+				}
+				temp.flip(i);
+			}
+		}
+		if(best_label!=-1)temp.set(best_label);
+	}
+	for (int i = 0; i < componentes_colors;++i) {
+		if (temp.test(i)&&i!=best_label) {
+			temp.flip(i);
+			int nc = get_components(g, temp, components) - 1;
+			db temp2(temp);
+			IloExpr expr2(env);
+			for (int j = 0; j < componentes_colors; ++j) {
+				if (!temp2.test(j)) {
+					temp2.set(j);
+					int n_w2 = get_components(g, temp2, components) - 1;
+					expr += IloInt(nc - n_w2) * z[j];
+					temp2.flip(j);
+				}
+			}
+			model.add(objExpr >= n_c - expr2);
+			expr2.end();
+
+			temp.set(i);
+		}
+	}
+
+}
+
+template <class Graph>
+int kLSFMVCA1(Graph &g, int k_sup, int n_labels) {
+	std::vector<int> components(num_vertices(g));
+	db temp(n_labels);
+	int num_c = get_components(g, temp, components);
+	int num_c_best = num_c;
+	while (temp.count() < k_sup) {
+		int best_label = 0;
+		for (int i = 0; i < n_labels ; ++i) {
 			if (!temp.test(i)) {
 				temp.set(i);
 				int nc = get_components(g, temp, components);
@@ -611,6 +792,7 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, int k, Graph &g) {
 		exp += Z[i];
 	}
 	mod.add(IloMinimize(env, exp));
+	//mod.add(exp == 1);
 	exp.end();
 	//first constraint relaxed add by cuts
 	// new constraint (4.4)CCut strength tree search
@@ -624,21 +806,35 @@ void buildCCutModel(IloModel mod,IloBoolVarArray Z, int k, Graph &g) {
 	mod.add(exptreecut >= N);
 	exptreecut.end();
 	//new constraint
-	mod.add(Z[f_colors] == 1);
 
-	//second constraint
+	int s = num_vertices(g) - 1;
+
+	//constraint every vertex has a colored edge incident
+	auto[first_vertex, last_vertex] = vertices(g);
+	while (first_vertex != last_vertex) {
+		db used_colors(n_colors);
+		auto[first_edge, last_edge] = in_edges(*first_vertex, g);
+		IloExpr expInEdges(env);
+		while (first_edge != last_edge) {
+			volatile int idx = colors[*first_edge];
+			if (!used_colors.test_set(idx, 1)) {
+				expInEdges += Z[colors[*first_edge]];
+			}
+			first_edge++;
+		}
+		mod.add(expInEdges >= 1);
+		expInEdges.end();
+		first_vertex++;
+	}
 	IloExpr texp(env);
 	for (int i = 0; i < f_colors; ++i) {
 		texp += Z[i];
 	}
-	mod.add(texp == k);
+	mod.add(texp <= k);
 	texp.end();
-	IloExpr nexp(env);
-	for (int i = f_colors; i < n_colors; ++i) {
-		nexp += Z[i];
-	}
-	nexp.end();
 }
+
+
 
 
 
@@ -651,8 +847,9 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 		IloBoolVarArray Z(env, n_colors);
 		IloNumArray pri(env,n_colors);
 		buildCCutModel(model, Z, k, g);
+		addSomeInequalities(g,model,Z, kLSFMVCA(g, k, n_colors) - 1,k,n_colors);
 		IloCplex cplex(model);
-		//cplex.exportModel("kSLF_CCut_relaxed.lp"); // good to see if the model is correct
+		cplex.exportModel("kSLF_Ccut.lp"); // good to see if the model is correct
 												   //cross your fingers
 		{//set priorities number edges by color.
 			auto it = boost::edges(g).first;
@@ -662,37 +859,37 @@ void solveModel(int n_vertices, int n_colors, int k, Graph &g) {
 				pri[colormap[*it]]++;
 				++it;
 			}	
-		}								   //cuts
-
+		}		   //cuts
 		//cplex.use(MyDFSCuts(env, Z, g));
-		//cplex.use(MyNewCuts(env, Z, g));
+		cplex.use(MyNewCuts(env, Z, k, g, kLSFMVCA(g, k, n_colors) - 1));
 		cplex.use(LazyCallback(env, Z,k, g));
-		cplex.use(MyBranchStrategy(env,Z,k,g));
+		//cplex.use(MyNewBranchStrategy(env,Z,k,g, kLSFMVCA(g, k, n_colors) - 1));
 
 		//paramenters
 		//cplex.setParam(IloCplex::Param::MIP::Display, 5);
 		//cplex.setParam(IloCplex::Param::Tune::Display, 3);
 		//cplex.setParam(IloCplex::Param::Simplex::Display, 2);
 		cplex.setParam(IloCplex::Param::Preprocessing::Presolve, 0);
+		//cplex.setParam(IloCplex::Param::MIP::Strategy::VariableSelect, 3);
 		cplex.setParam(IloCplex::Param::Emphasis::MIP, 1);
 		cplex.setParam(IloCplex::Param::MIP::Tolerances::LowerCutoff, 1);
-		cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, kLSFMVCA(g,k,n_colors) - 1);
-		//cplex.setParam(IloCplex::Param::Parallel, -1);
-		cplex.setParam(IloCplex::Param::Threads,8);// n threads
+		cplex.setParam(IloCplex::Param::MIP::Tolerances::UpperCutoff, kLSFMVCA(g,k,n_colors)-1);
+		cplex.setParam(IloCplex::Param::Parallel, -1);
+		cplex.setParam(IloCplex::Param::Threads,4);// n threads
 		//TODO add MIP start
 		// add set limit time
 		cplex.setParam(IloCplex::TiLim, 7300);
 		//set priorities to colors with more edges.
 		//pri = ordering(env, n_colors, g, k);
-		cplex.setPriorities(Z,pri);
-		//cplex.setPriorities(Z, pri);
+		//cplex.setPriorities(Z,pri);
+		cplex.setPriorities(Z, pri);
 		cplex.solve();
 		cplex.out() << "solution status = " << cplex.getStatus() << endl;
 		db temp(n_colors);
 		cplex.out() << endl;
 		cplex.out() << "Number of components of original problem  = " << cplex.getObjValue() << endl;
 		cplex.out() << "color(s) solution:";
-		for (int i = 0; i < Z.getSize()-n_vertices + 1; i++) {
+		for (int i = 0; i < Z.getSize() - n_vertices+1; i++) {
 			if (std::abs(cplex.getValue(Z[i]) - 1) <= 1e-3) {
 				cplex.out() << "  " << i;
 				temp.set(i);
@@ -775,7 +972,7 @@ int main(int argc, const char *argv[])
 				//boost::add_edge(95, 76, property<edge_color_t, int>(n_colors++), g)
 				//std::tie(it, end) = boost::edges(g);
 				//print_edges(it, end, g);
-				//MCR(g,n_colors);
+				MCR(g,n_colors);
 				solveModel(n_vertices, n_colors, k, g);
 			}
 			else {
